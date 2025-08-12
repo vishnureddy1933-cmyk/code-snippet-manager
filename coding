@@ -1,0 +1,223 @@
+import java.util.*;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+import java.nio.file.*;
+import java.io.IOException;
+
+public class Main {
+
+    enum Priority { LOW, MEDIUM, HIGH }
+
+    static class Task {
+        int id;
+        String description;
+        boolean isDone;
+        LocalDate due;        // nullable
+        Priority priority;    // never null
+
+        Task(int id, String description, boolean isDone, LocalDate due, Priority prio) {
+            this.id = id;
+            this.description = description;
+            this.isDone = isDone;
+            this.due = due;
+            this.priority = prio == null ? Priority.MEDIUM : prio;
+        }
+
+        @Override
+        public String toString() {
+            String dueStr = (due == null) ? "" : " | Due: " + due;
+            return String.format("%3d. %s%s | %s | %s",
+                    id,
+                    isDone ? "[x] " : "[ ] ",
+                    description,
+                    "Priority: " + priority,
+                    dueStr.isEmpty() ? "No due date" : dueStr.substring(3));
+        }
+
+        // CSV: id|isDone|description|due|priority
+        String toCsv() {
+            String safeDesc = description.replace("|", "¦");
+            String dueStr = (due == null) ? "" : due.toString();
+            return id + "|" + (isDone ? "1" : "0") + "|" + safeDesc + "|" + dueStr + "|" + priority;
+        }
+
+        static Task fromCsv(String line) {
+            String[] parts = line.split("\\|", -1);
+            int id = Integer.parseInt(parts[0]);
+            boolean done = "1".equals(parts[1]);
+            String desc = parts[2].replace("¦", "|");
+            LocalDate due = parts[3].isEmpty() ? null : LocalDate.parse(parts[3]);
+            Priority prio = parts.length >= 5 ? Priority.valueOf(parts[4]) : Priority.MEDIUM;
+            return new Task(id, desc, done, due, prio);
+        }
+    }
+
+    // Data
+    static final List<Task> tasks = new ArrayList<>();
+    static int nextId = 1;
+    static final Path FILE = Paths.get("tasks.csv");
+    static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd");
+
+    public static void main(String[] args) {
+        load();
+        Scanner sc = new Scanner(System.in);
+
+        while (true) {
+            System.out.println("\nPersonal Task Tracker");
+            System.out.println("1. Add Task");
+            System.out.println("2. View Tasks");
+            System.out.println("3. Toggle Done/Undone");
+            System.out.println("4. Edit Task");
+            System.out.println("5. Delete Task");
+            System.out.println("6. Clear Completed");
+            System.out.println("7. Exit");
+            System.out.print("Choose an option: ");
+
+            int choice = readInt(sc);
+            switch (choice) {
+                case 1 -> addTask(sc);
+                case 2 -> viewTasks(sc);
+                case 3 -> toggleDone(sc);
+                case 4 -> editTask(sc);
+                case 5 -> deleteTask(sc);
+                case 6 -> clearCompleted();
+                case 7 -> { save(); System.out.println("Goodbye!"); return; }
+                default -> System.out.println("Invalid option!");
+            }
+        }
+    }
+
+    // ---- Actions ----
+    static void addTask(Scanner sc) {
+        System.out.print("Enter task description: ");
+        String desc = sc.nextLine().trim();
+        if (desc.isEmpty()) { System.out.println("Description cannot be empty."); return; }
+
+        LocalDate due = readOptionalDate(sc, "Enter due date (yyyy-MM-dd) or leave blank: ");
+        Priority prio = readPriority(sc, "Enter priority [LOW/MEDIUM/HIGH] (default MEDIUM): ");
+
+        Task t = new Task(nextId++, desc, false, due, prio);
+        tasks.add(t);
+        save();
+        System.out.println("Task added!");
+    }
+
+    static void viewTasks(Scanner sc) {
+        if (tasks.isEmpty()) { System.out.println("No tasks found."); return; }
+        // Sort: not done first, then earlier due dates, then higher priority
+        tasks.stream()
+             .sorted(Comparator
+                 .comparing((Task t) -> t.isDone)
+                 .thenComparing(t -> t.due, Comparator.nullsLast(Comparator.naturalOrder()))
+                 .thenComparing(t -> t.priority))
+             .forEach(System.out::println);
+    }
+
+    static void toggleDone(Scanner sc) {
+        Task t = pickById(sc);
+        if (t == null) return;
+        t.isDone = !t.isDone;
+        save();
+        System.out.println("Task " + t.id + (t.isDone ? " completed." : " re-opened."));
+    }
+
+    static void editTask(Scanner sc) {
+        Task t = pickById(sc);
+        if (t == null) return;
+
+        System.out.print("New description (leave blank to keep): ");
+        String desc = sc.nextLine().trim();
+        if (!desc.isEmpty()) t.description = desc;
+
+        LocalDate due = readOptionalDate(sc, "New due date (yyyy-MM-dd) or leave blank to clear/keep: ");
+        // If user typed nothing, keep existing. If they typed "", we already got null.
+        if (due != null || confirm(sc, "Clear due date? (y/N): ")) {
+            t.due = due;
+        }
+
+        Priority prio = readPriority(sc, "New priority [LOW/MEDIUM/HIGH] (leave blank to keep): ");
+        if (prio != null) t.priority = prio;
+
+        save();
+        System.out.println("Task updated.");
+    }
+
+    static void deleteTask(Scanner sc) {
+        Task t = pickById(sc);
+        if (t == null) return;
+        tasks.remove(t);
+        save();
+        System.out.println("Task deleted!");
+    }
+
+    static void clearCompleted() {
+        boolean any = tasks.removeIf(t -> t.isDone);
+        save();
+        System.out.println(any ? "Cleared completed tasks." : "No completed tasks to clear.");
+    }
+
+    // ---- Helpers ----
+    static Task pickById(Scanner sc) {
+        if (tasks.isEmpty()) { System.out.println("No tasks found."); return null; }
+        viewTasks(sc);
+        System.out.print("Enter task ID: ");
+        int id = readInt(sc);
+        return tasks.stream().filter(t -> t.id == id).findFirst()
+                .orElseGet(() -> { System.out.println("No task with ID " + id); return null; });
+    }
+
+    static int readInt(Scanner sc) {
+        try { return Integer.parseInt(sc.nextLine().trim()); }
+        catch (Exception e) { return -1; }
+    }
+
+    static LocalDate readOptionalDate(Scanner sc, String prompt) {
+        System.out.print(prompt);
+        String s = sc.nextLine().trim();
+        if (s.isEmpty()) return null;
+        try { return LocalDate.parse(s, DATE_FMT); }
+        catch (Exception e) { System.out.println("Invalid date. Skipping."); return null; }
+    }
+
+    static Priority readPriority(Scanner sc, String prompt) {
+        System.out.print(prompt);
+        String s = sc.nextLine().trim();
+        if (s.isEmpty()) return null;
+        try { return Priority.valueOf(s.toUpperCase()); }
+        catch (Exception e) { System.out.println("Invalid priority. Using MEDIUM."); return Priority.MEDIUM; }
+    }
+
+    static boolean confirm(Scanner sc, String prompt) {
+        System.out.print(prompt);
+        String s = sc.nextLine().trim().toLowerCase();
+        return s.equals("y") || s.equals("yes");
+    }
+
+    // ---- Persistence ----
+    static void load() {
+        if (!Files.exists(FILE)) return;
+        try {
+            List<String> lines = Files.readAllLines(FILE);
+            int maxId = 0;
+            for (String line : lines) {
+                if (line.isBlank()) continue;
+                Task t = Task.fromCsv(line);
+                tasks.add(t);
+                maxId = Math.max(maxId, t.id);
+            }
+            nextId = maxId + 1;
+        } catch (IOException e) {
+            System.out.println("Failed to load tasks: " + e.getMessage());
+        }
+    }
+
+    static void save() {
+        List<String> lines = new ArrayList<>();
+        for (Task t : tasks) lines.add(t.toCsv());
+        try {
+            Files.write(FILE, lines, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+        } catch (IOException e) {
+            System.out.println("Failed to save tasks: " + e.getMessage());
+        }
+    }
+}
